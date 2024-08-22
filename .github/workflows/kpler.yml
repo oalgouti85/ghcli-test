@@ -1,0 +1,144 @@
+name: tests-ghcli/kpler
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: "${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  Build-CroneJob-ECR-Image:
+    runs-on:
+      - self-hosted
+      - docker
+    container:
+      image: docker
+    if: !(${{ github.event_name }} == 'web') || ${{ github.ref }}
+    timeout-minutes: 60
+    services:
+      docker:
+        image: docker:dind
+        options: "--entrypoint dockerd-entrypoint.sh"
+    env:
+      DOCKER_HOST: tcp://docker:2375/
+      DOCKER_TLS_CERTDIR: ''
+      CLUSTER_NAME: xxxxxx
+      NAMESPACE: xxxxx
+      DOCKER_IMAGE_NAME: xxxxx
+      AWS_DEFAULT_REGION: eu-west-1
+      KUBECTL_VERSION: v1.19.0
+      DEPLOYMENT_NAME: xxxx
+      ECR_REGISTRY: xxxx
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: apk add --no-cache aws-cli
+    - run: aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+    - run: docker build -f Dockerfile --build-arg AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} --build-arg AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} --pull -t "${ECR_REGISTRY}/${DOCKER_IMAGE_NAME}:${{ github.ref }}" .
+    - run: docker push "${ECR_REGISTRY}/${DOCKER_IMAGE_NAME}:${{ github.ref }}"
+  Build-Job-ECR-Image:
+    runs-on:
+      - self-hosted
+      - docker
+    container:
+      image: docker
+    if: ${{ github.ref }} == 'dev'
+    timeout-minutes: 60
+    services:
+      docker:
+        image: docker:dind
+        options: "--entrypoint dockerd-entrypoint.sh"
+    env:
+      DOCKER_HOST: tcp://docker:2375/
+      DOCKER_TLS_CERTDIR: ''
+      CLUSTER_NAME: xxxxxx
+      NAMESPACE: xxxxx
+      DOCKER_IMAGE_NAME: xxxxx
+      AWS_DEFAULT_REGION: eu-west-1
+      KUBECTL_VERSION: v1.19.0
+      DEPLOYMENT_NAME: xxxx
+      ECR_REGISTRY: xxxx
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: apk add --no-cache aws-cli
+    - run: aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+    - run: docker build -f Dockerfile --build-arg AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} --build-arg AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} --pull -t "${ECR_REGISTRY}/${DOCKER_IMAGE_NAME}:${{ github.ref }}" .
+    - run: docker push "${ECR_REGISTRY}/${DOCKER_IMAGE_NAME}:${{ github.ref }}"
+  Deploy-CronJob-TO-EKS:
+    needs:
+    - Build-CroneJob-ECR-Image
+    - Build-Job-ECR-Image
+    runs-on:
+      - self-hosted
+      - docker
+    container:
+      image: alpine/helm:3.8.0
+      options: "--entrypoint "
+    if: always()
+    timeout-minutes: 60
+    env:
+      DOCKER_HOST: tcp://docker:2375/
+      DOCKER_TLS_CERTDIR: ''
+      CLUSTER_NAME: xxxxxx
+      NAMESPACE: xxxxx
+      DOCKER_IMAGE_NAME: xxxxx
+      AWS_DEFAULT_REGION: eu-west-1
+      KUBECTL_VERSION: v1.19.0
+      DEPLOYMENT_NAME: xxxx
+      ECR_REGISTRY: xxxx
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: |
+        apk --update add curl aws-cli
+        curl -L -o /usr/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+        chmod +x /usr/bin/kubectl
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        mv /tmp/eksctl /usr/local/bin
+    - run: helm repo add --username gitlab-ci-token --password ${{ github.token }} marinetraffic ${{ github.api_url }}/projects/505/packages/helm/stable
+    - run: eksctl utils write-kubeconfig --kubeconfig kubeconfig-$CLUSTER_NAME.yaml --cluster $CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - run: export KUBECONFIG=${PWD}/kubeconfig-$CLUSTER_NAME.yaml
+    - run: helm upgrade --install ${DEPLOYMENT_NAME} marinetraffic/cronjobs -n ${NAMESPACE} --kubeconfig $KUBECONFIG --create-namespace -f .gitlab/environments/production.yaml --set job[0].image.tag=${{ github.ref }}
+  Deploy-Job-TO-EKS:
+    needs:
+    - Build-CroneJob-ECR-Image
+    - Build-Job-ECR-Image
+    runs-on:
+      - self-hosted
+      - docker
+    container:
+      image: alpine/helm:3.8.0
+      options: "--entrypoint "
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    env:
+      DOCKER_HOST: tcp://docker:2375/
+      DOCKER_TLS_CERTDIR: ''
+      CLUSTER_NAME: xxxxxx
+      NAMESPACE: xxxxx
+      DOCKER_IMAGE_NAME: xxxxx
+      AWS_DEFAULT_REGION: eu-west-1
+      KUBECTL_VERSION: v1.19.0
+      DEPLOYMENT_NAME: xxxx
+      ECR_REGISTRY: xxxx
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: |
+        apk --update add curl aws-cli
+        curl -L -o /usr/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+        chmod +x /usr/bin/kubectl
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        mv /tmp/eksctl /usr/local/bin
+    - run: helm repo add --username gitlab-ci-token --password ${{ github.token }} marinetraffic ${{ github.api_url }}/projects/505/packages/helm/stable
+    - run: eksctl utils write-kubeconfig --kubeconfig kubeconfig-$CLUSTER_NAME.yaml --cluster $CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - run: export KUBECONFIG=${PWD}/kubeconfig-$CLUSTER_NAME.yaml
+    - run: helm upgrade --install ${{ github.ref }} marinetraffic/job -n ${NAMESPACE} --kubeconfig $KUBECONFIG --create-namespace -f .gitlab/environments/development.yaml --set image.tag=${{ github.ref }}
